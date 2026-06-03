@@ -188,6 +188,18 @@ export function buildDaemonTranscript(history: ChatMessage[], targetAgentId?: st
 
 export interface DaemonStreamHandlers extends StreamHandlers {
   onAgentEvent: (ev: AgentEvent) => void;
+  /**
+   * Transient streaming-only tool signals (`tool_use_start`,
+   * `tool_input_delta`). They are NOT persisted AgentEvents — the consumer
+   * uses them to render a live, growing tool card and reconciles to the
+   * authoritative `tool_use` AgentEvent (same `id`) when the block finishes.
+   * Optional: callers that don't render live tool cards can omit it.
+   */
+  onToolStream?: (
+    ev:
+      | { type: 'tool_use_start'; id: string; name: string }
+      | { type: 'tool_input_delta'; id: string; delta: string },
+  ) => void;
 }
 
 export interface DaemonStreamOptions {
@@ -730,6 +742,13 @@ async function consumeDaemonRun({
           }
 
           if (event.event === 'agent') {
+            // Transient streaming-only tool signals ride a side channel so
+            // they never enter the persisted AgentEvent stream. The final
+            // `tool_use` (same id) is the authoritative, replay-safe record.
+            if (event.data.type === 'tool_use_start' || event.data.type === 'tool_input_delta') {
+              handlers.onToolStream?.(event.data);
+              continue;
+            }
             const translated = translateAgentEvent(event.data);
             if (!translated) continue;
             if (translated.kind === 'text') {

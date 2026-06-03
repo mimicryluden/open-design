@@ -89,6 +89,7 @@ import { randomUUID } from '../utils/uuid';
 import { DEFAULT_NOTIFICATIONS } from '../state/config';
 import type { TodoItem } from '../runtime/todos';
 import { appendErrorStatusEvent } from '../runtime/chat-events';
+import { AUQ_STREAMING_KEY, parsePartialAskUserQuestion } from '../runtime/ask-user-question';
 import {
   buildDesignSystemPackageAuditRepairPrompt,
   summarizeDesignSystemPackageAudit,
@@ -269,6 +270,29 @@ interface DesignSystemReviewDetails {
   feedback?: string;
   files?: string[];
   agentTask?: DesignSystemReviewAgentTask;
+}
+
+/**
+ * Append `ev` to the event list, except for `tool_use` which is upserted by
+ * `id`: a tool's streaming-synthesized placeholder and its later
+ * authoritative event share one slot, so the card updates in place (no
+ * remount, no duplicate) and reconciles to the final input when the block
+ * finishes.
+ */
+function upsertAgentEvent(
+  prev: AgentEvent[] | undefined,
+  ev: AgentEvent,
+): AgentEvent[] {
+  const events = prev ?? [];
+  if (ev.kind === 'tool_use') {
+    const idx = events.findIndex((e) => e.kind === 'tool_use' && e.id === ev.id);
+    if (idx >= 0) {
+      const next = events.slice();
+      next[idx] = ev;
+      return next;
+    }
+  }
+  return [...events, ev];
 }
 
 function workspacePanelMinWidthForSplit(splitWidth: number): number {
@@ -2516,6 +2540,9 @@ export function ProjectView({
       let parsedArtifact: Artifact | null = null;
       let liveHtml = '';
       let streamedText = '';
+      // Per-run scratch for tools whose input streams in token-by-token (see
+      // `onToolStream`). Keyed by tool_use id → { name, accumulated raw JSON }.
+      const toolStreamBufs = new Map<string, { name: string; buf: string }>();
 
       const updateAssistant = (updater: (prev: ChatMessage) => ChatMessage) => {
         setMessages((curr) =>
@@ -2544,7 +2571,7 @@ export function ProjectView({
       };
       const pushEvent = (ev: AgentEvent) => {
         textBuffer.flush();
-        updateAssistant((prev) => ({ ...prev, events: [...(prev.events ?? []), ev] }));
+        updateAssistant((prev) => ({ ...prev, events: upsertAgentEvent(prev.events, ev) }));
         if (ev.kind === 'live_artifact') {
           setLiveArtifactEvents((prev) => appendLiveArtifactEventItem(prev, ev));
           void refreshLiveArtifacts().then(() => {
@@ -2668,6 +2695,43 @@ export function ProjectView({
         onAgentEvent: (ev: AgentEvent) => {
           if (ev.kind === 'text') textBuffer.appendTextEvent(ev.text);
           else pushEvent(ev);
+        },
+        // Render a live, growing AskUserQuestion card from the streamed input
+        // JSON. We synthesize a transient `tool_use` AgentEvent (marked
+        // `__streaming`) and update it in place by id as fragments arrive;
+        // the authoritative `tool_use` from `content_block_stop` later
+        // supersedes it via the same upsert-by-id path in `pushEvent`.
+        onToolStream: (
+          ev:
+            | { type: 'tool_use_start'; id: string; name: string }
+            | { type: 'tool_input_delta'; id: string; delta: string },
+        ) => {
+          if (ev.type === 'tool_use_start') {
+            toolStreamBufs.set(ev.id, { name: ev.name, buf: '' });
+            updateAssistant((prev) => ({
+              ...prev,
+              events: upsertAgentEvent(prev.events, {
+                kind: 'tool_use',
+                id: ev.id,
+                name: ev.name,
+                input: { questions: [], [AUQ_STREAMING_KEY]: true },
+              }),
+            }));
+            return;
+          }
+          const entry = toolStreamBufs.get(ev.id);
+          if (!entry) return;
+          entry.buf += ev.delta;
+          const questions = parsePartialAskUserQuestion(entry.buf);
+          updateAssistant((prev) => ({
+            ...prev,
+            events: upsertAgentEvent(prev.events, {
+              kind: 'tool_use',
+              id: ev.id,
+              name: entry.name,
+              input: { questions, [AUQ_STREAMING_KEY]: true },
+            }),
+          }));
         },
         onDone: (fullText = '') => {
           textBuffer.flush();

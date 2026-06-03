@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatFormAnswers, splitOnQuestionForms } from '../../src/artifacts/question-form';
+import {
+  formatFormAnswers,
+  splitOnQuestionForms,
+  parsePartialQuestionForm,
+} from '../../src/artifacts/question-form';
 
 const VALID_BODY = `{
   "questions": [
@@ -121,5 +125,40 @@ describe('splitOnQuestionForms', () => {
     if (out[1]?.kind === 'form') {
       expect(out[1].form.id).toBe('x');
     }
+  });
+});
+
+describe('parsePartialQuestionForm (true token-by-token streaming)', () => {
+  it('surfaces a question before its object closes, then grows its options', () => {
+    // Open tag + a question whose label has arrived but whose options array is
+    // still mid-stream (no closing `}` on the question object yet).
+    const midLabel = '<question-form id="discovery">{"questions":[{"id":"platform","label":"Platform"';
+    const f1 = parsePartialQuestionForm(midLabel);
+    expect(f1?.questions.map((q) => q.label)).toEqual(['Platform']);
+
+    const oneOption =
+      '<question-form id="discovery">{"questions":[{"id":"platform","label":"Platform","type":"radio","options":["Mobile"';
+    const f2 = parsePartialQuestionForm(oneOption);
+    expect(f2?.questions[0]?.options?.map((o) => o.label)).toEqual(['Mobile']);
+
+    const twoOptions =
+      '<question-form id="discovery">{"questions":[{"id":"platform","label":"Platform","type":"radio","options":["Mobile","Desktop"';
+    const f3 = parsePartialQuestionForm(twoOptions);
+    expect(f3?.questions[0]?.options?.map((o) => o.label)).toEqual(['Mobile', 'Desktop']);
+  });
+
+  it('holds back a trailing question until its label exists (no id placeholder flicker)', () => {
+    // First question complete; second object opened but no label yet.
+    const buf =
+      '<question-form id="discovery">{"questions":[{"id":"a","label":"First","type":"text"},{"id":"b"';
+    const f = parsePartialQuestionForm(buf);
+    expect(f?.questions.map((q) => q.label)).toEqual(['First']);
+  });
+
+  it('reads title/id from the open tag before any question arrives', () => {
+    const f = parsePartialQuestionForm('<question-form id="discovery" title="Quick brief">{"questions":[');
+    expect(f?.id).toBe('discovery');
+    expect(f?.title).toBe('Quick brief');
+    expect(f?.questions).toEqual([]);
   });
 });

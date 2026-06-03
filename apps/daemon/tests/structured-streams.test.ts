@@ -89,6 +89,102 @@ describe('structured agent stream fixtures', () => {
     });
   });
 
+  it('streams AskUserQuestion input as tool_use_start + tool_input_delta before the final tool_use', () => {
+    const events: unknown[] = [];
+    const handler = createClaudeStreamHandler((event: unknown) => events.push(event));
+
+    const full = '{"questions":[{"question":"Which database?","header":"DB","multiSelect":false,"options":[{"label":"Postgres"},{"label":"SQLite"}]}]}';
+    const mid = full.indexOf('"options"');
+
+    handler.feed(`${JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'message_start', message: { id: 'msg-q' } },
+    })}\n${JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu-q', name: 'AskUserQuestion' },
+      },
+    })}\n${JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: full.slice(0, mid) },
+      },
+    })}\n${JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: full.slice(mid) },
+      },
+    })}\n${JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 0 },
+    })}\n`);
+    handler.flush();
+
+    const typeOf = (e: unknown) => (typeof e === 'object' && e !== null ? (e as { type?: string }).type : undefined);
+
+    // The frame announces itself the moment the block opens, before any input.
+    expect(events.find((e) => typeOf(e) === 'tool_use_start')).toEqual({
+      type: 'tool_use_start',
+      id: 'toolu-q',
+      name: 'AskUserQuestion',
+    });
+
+    // Each partial_json fragment is forwarded verbatim, in order, keyed by id.
+    const deltas = events.filter((e) => typeOf(e) === 'tool_input_delta') as Array<{ id: string; delta: string }>;
+    expect(deltas).toHaveLength(2);
+    expect(deltas.every((d) => d.id === 'toolu-q')).toBe(true);
+    expect(deltas.map((d) => d.delta).join('')).toBe(full);
+
+    // The authoritative, fully-parsed tool_use still lands at block stop.
+    const toolUses = events.filter((e) => typeOf(e) === 'tool_use');
+    expect(toolUses).toHaveLength(1);
+    expect(toolUses[0]).toMatchObject({
+      type: 'tool_use',
+      id: 'toolu-q',
+      name: 'AskUserQuestion',
+      input: { questions: [{ question: 'Which database?' }] },
+    });
+  });
+
+  it('does not stream input_json_delta fragments for non-AskUserQuestion tools', () => {
+    const events: unknown[] = [];
+    const handler = createClaudeStreamHandler((event: unknown) => events.push(event));
+
+    handler.feed(`${JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'message_start', message: { id: 'msg-w' } },
+    })}\n${JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu-w', name: 'Write' },
+      },
+    })}\n${JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{"file_path":"a.html","content":"x"}' },
+      },
+    })}\n${JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 0 },
+    })}\n`);
+    handler.flush();
+
+    const typeOf = (e: unknown) => (typeof e === 'object' && e !== null ? (e as { type?: string }).type : undefined);
+    expect(events.some((e) => typeOf(e) === 'tool_use_start')).toBe(false);
+    expect(events.some((e) => typeOf(e) === 'tool_input_delta')).toBe(false);
+    expect(events.filter((e) => typeOf(e) === 'tool_use')).toHaveLength(1);
+  });
+
   it('preserves Claude Code tool input from content_block_start when no delta arrives', () => {
     const events: unknown[] = [];
     const handler = createClaudeStreamHandler((event: unknown) => events.push(event));

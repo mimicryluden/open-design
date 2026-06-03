@@ -25,6 +25,8 @@
  * Splits a final assistant text payload into ordered segments — prose +
  * forms — so AssistantMessage can render the form inline.
  */
+import { parsePartialJson } from '../runtime/partial-json';
+
 export type QuestionType =
   | 'radio'
   | 'checkbox'
@@ -299,7 +301,7 @@ export function parsePartialQuestionForm(input: string): QuestionForm | null {
   const title =
     attrs.title ?? extractJsonStringField(body, 'title') ?? 'A few quick questions';
   const description = extractJsonStringField(body, 'description');
-  const questions = extractCompleteQuestions(body);
+  const questions = extractStreamingQuestions(body);
   return {
     id,
     title,
@@ -308,54 +310,29 @@ export function parsePartialQuestionForm(input: string): QuestionForm | null {
   };
 }
 
-// Pull complete `{...}` question objects out of a partial `"questions": [ … ]`
-// array, stopping at the first object whose closing brace hasn't streamed in.
-function extractCompleteQuestions(body: string): FormQuestion[] {
-  const keyMatch = /"questions"\s*:\s*\[/.exec(body);
-  if (!keyMatch) return [];
+// Extract questions from a still-streaming `"questions": [ … ]` body. Unlike a
+// complete-objects-only pass, this repairs the truncated JSON prefix so a
+// question shows the moment its `label` (prompt) text exists and its options
+// grow in one at a time — true token-by-token streaming, matching the
+// AskUserQuestion card. The trailing in-flight object with no label yet is
+// held back (no "q1" placeholder flicker); it appears once its label lands.
+function extractStreamingQuestions(body: string): FormQuestion[] {
+  const data = parsePartialJson(body);
+  if (!data || typeof data !== 'object') return [];
+  const rawQuestions = (data as { questions?: unknown }).questions;
+  if (!Array.isArray(rawQuestions)) return [];
   const out: FormQuestion[] = [];
-  let i = keyMatch.index + keyMatch[0].length;
-  let index = 0;
-  while (i < body.length) {
-    while (i < body.length && /[\s,]/.test(body[i] as string)) i++;
-    if (i >= body.length || body[i] === ']') break;
-    if (body[i] !== '{') break;
-    const objStr = extractBalancedObject(body, i);
-    if (!objStr) break;
-    try {
-      const mapped = mapRawQuestion(JSON.parse(objStr), index);
-      if (mapped) out.push(mapped);
-    } catch {
-      break;
-    }
-    i += objStr.length;
-    index++;
-  }
+  rawQuestions.forEach((raw, index) => {
+    // Require a real prompt before surfacing the question. `mapRawQuestion`
+    // would otherwise default a label-less object to its id ("q1"), which
+    // reads as a flicker while the model is still typing the label.
+    if (!raw || typeof raw !== 'object') return;
+    const label = (raw as Record<string, unknown>).label;
+    if (typeof label !== 'string' || label.trim().length === 0) return;
+    const mapped = mapRawQuestion(raw, index);
+    if (mapped) out.push(mapped);
+  });
   return out;
-}
-
-// Return the substring for the balanced `{...}` object starting at `start`,
-// or null if it never closes (string-aware so braces inside strings don't count).
-function extractBalancedObject(s: string, start: number): string | null {
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i] as string;
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') inStr = true;
-    else if (c === '{') depth++;
-    else if (c === '}') {
-      depth--;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
-  }
-  return null;
 }
 
 // Best-effort extraction of a top-level "field": "value" string from a partial

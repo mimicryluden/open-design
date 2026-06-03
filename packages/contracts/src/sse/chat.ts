@@ -80,6 +80,15 @@ export type DaemonAgentPayload =
   | { type: 'thinking_start' }
   | LiveArtifactSsePayload
   | LiveArtifactRefreshSsePayload
+  // Transient streaming-only signals for a tool whose input JSON is still
+  // assembling token-by-token. They let the UI render a live card frame and
+  // grow it as `partial_json` fragments arrive, instead of waiting for the
+  // whole block to finish. They are NOT persisted: the authoritative,
+  // replay-safe record is the final `tool_use` event below (same `id`),
+  // which supersedes whatever the streaming pass rendered. Currently emitted
+  // only for `AskUserQuestion` (see `apps/daemon/src/claude-stream.ts`).
+  | { type: 'tool_use_start'; id: string; name: string }
+  | { type: 'tool_input_delta'; id: string; delta: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; toolUseId: string; content: string; isError?: boolean }
   | { type: 'usage'; usage?: { input_tokens?: number; output_tokens?: number }; costUsd?: number; durationMs?: number }

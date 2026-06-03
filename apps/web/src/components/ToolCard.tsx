@@ -10,6 +10,11 @@
  */
 import { useState } from 'react';
 import { useT } from '../i18n';
+import {
+  parseAskUserQuestionInput,
+  shapePartialQuestions,
+  isStreamingAuqInput,
+} from '../runtime/ask-user-question';
 import { isTodoWriteToolName, parseTodoWriteInput } from '../runtime/todos';
 import { getToolRenderer, toRenderProps } from '../runtime/tool-renderers';
 import type { AgentEvent } from '../types';
@@ -141,43 +146,9 @@ function OpenInTabButton({ filePath, ctx }: { filePath: string; ctx: FileToolCtx
 //   { questions: [{ question, header, options: [{ label, description }],
 //     multiSelect }, ...] }
 // We accept either array of objects or array of plain strings for `options`
-// to stay tolerant of small protocol drift.
-type AuqOption = { label: string; description?: string };
-type AuqQuestion = {
-  question: string;
-  header?: string;
-  options: AuqOption[];
-  multiSelect: boolean;
-};
-
-function parseAskUserQuestionInput(input: unknown): AuqQuestion[] {
-  const obj = (input ?? {}) as { questions?: unknown };
-  if (!Array.isArray(obj.questions)) return [];
-  const result: AuqQuestion[] = [];
-  for (const raw of obj.questions) {
-    if (!raw || typeof raw !== 'object') continue;
-    const q = raw as Record<string, unknown>;
-    const question = typeof q.question === 'string' ? q.question : '';
-    if (!question) continue;
-    const header = typeof q.header === 'string' ? q.header : undefined;
-    const multiSelect = q.multiSelect === true;
-    const rawOptions = Array.isArray(q.options) ? q.options : [];
-    const options: AuqOption[] = [];
-    for (const opt of rawOptions) {
-      if (typeof opt === 'string') options.push({ label: opt });
-      else if (opt && typeof opt === 'object') {
-        const o = opt as Record<string, unknown>;
-        const label = typeof o.label === 'string' ? o.label : '';
-        if (!label) continue;
-        const description = typeof o.description === 'string' ? o.description : undefined;
-        options.push(description ? { label, description } : { label });
-      }
-    }
-    if (options.length === 0) continue;
-    result.push({ question, header, options, multiSelect });
-  }
-  return result;
-}
+// to stay tolerant of small protocol drift. Parsing lives in
+// `../runtime/ask-user-question` (strict for finished input, lenient +
+// truncation-tolerant for the streaming pass).
 
 function AskUserQuestionCard({
   toolUseId,
@@ -199,7 +170,15 @@ function AskUserQuestionCard({
   onAnswerToolUse?: (toolUseId: string, content: string) => Promise<boolean> | boolean;
 }) {
   const t = useT();
-  const questions = parseAskUserQuestionInput(input);
+  // While the run is still emitting this tool's input, the synthesized input
+  // carries a streaming marker; parse it leniently (a question shows the
+  // moment its prompt text exists, before options finish) and render it
+  // read-only. The final `tool_use` drops the marker and we switch to the
+  // strict parse + interactivity. We also require `runStreaming` so a marker
+  // that somehow lands in a persisted snapshot can't leave a reloaded card
+  // stuck mid-reveal — once the run has ended we always use the strict parse.
+  const streaming = isStreamingAuqInput(input) && runStreaming;
+  const questions = streaming ? shapePartialQuestions(input) : parseAskUserQuestionInput(input);
   // Initial selections: empty string per question for single-select, empty
   // array for multi-select. Indexing by question text keeps things simple
   // because the SDK does not assign explicit ids.
@@ -254,7 +233,9 @@ function AskUserQuestionCard({
   // open stream-json child) or the legacy `onSubmitForm` (fallback that
   // sends the answer as a fresh user message).
   const canSubmit = !!onAnswerToolUse || !!onSubmitForm;
-  const locked = hasRealAnswer || !isLast || !canSubmit;
+  // Streaming input is never interactive: the question text and options are
+  // still being written, so selecting or submitting would race the model.
+  const locked = streaming || hasRealAnswer || !isLast || !canSubmit;
   const ready = questions.every((q) => {
     const v = selections[q.question];
     return Array.isArray(v) ? v.length > 0 : typeof v === 'string' && v.trim().length > 0;
@@ -321,11 +302,19 @@ function AskUserQuestionCard({
   // animation on `op-status-running` is misleading and noisy.
   const statusClass = hasRealAnswer ? 'op-status-ok' : 'op-status-awaiting';
   return (
-    <div className={`op-card op-ask-question${locked ? ' op-ask-question-locked' : ''}`} data-testid="ask-user-question">
+    <div
+      className={`op-card op-ask-question${locked ? ' op-ask-question-locked' : ''}${streaming ? ' op-ask-question-streaming' : ''}`}
+      data-testid="ask-user-question"
+      aria-busy={streaming || undefined}
+    >
       <div className="op-card-head">
         <span className="op-icon" aria-hidden>?</span>
         <span className="op-title">{t('tool.askQuestion')}</span>
-        {statusLabel ? (
+        {streaming ? (
+          <span className="op-ask-question-typing" aria-hidden>
+            <i /><i /><i />
+          </span>
+        ) : statusLabel ? (
           <span className={`op-status ${statusClass}`}>{statusLabel}</span>
         ) : null}
       </div>

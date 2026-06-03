@@ -10,6 +10,8 @@
  *                     "thinking")
  *   - text_delta    : assistant text chunk (gets fed to the artifact parser)
  *   - thinking_delta: extended-thinking chunk (shown in a collapsed block)
+ *   - tool_use_start: { id, name }            (streamable tools only — frame)
+ *   - tool_input_delta: { id, delta }         (streamable tools only — input)
  *   - tool_use      : { id, name, input }     (fires when input is complete)
  *   - tool_result   : { tool_use_id, content, is_error }
  *   - usage         : aggregated input/output/cache tokens + cost
@@ -30,6 +32,16 @@ type BlockState = {
   input: string;
   inputValue?: unknown;
 };
+
+// Tools whose input JSON we forward token-by-token so the UI can render a
+// live, growing card instead of waiting for the whole block to finish. We
+// keep this narrow on purpose: AskUserQuestion is the only tool whose card
+// is an interactive surface the user stares at while it streams, so the
+// extra per-fragment SSE traffic is worth it. Other tools (Write, Bash, …)
+// still emit a single aggregated `tool_use` at block stop.
+function isStreamableToolName(name: unknown): boolean {
+  return name === 'AskUserQuestion' || name === 'ask_user_question';
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -273,6 +285,12 @@ export function createClaudeStreamHandler(onEvent: EventSink) {
       if (block.type === 'thinking') {
         onEvent({ type: 'thinking_start' });
       }
+      // Announce a streamable tool's frame the moment its block opens, before
+      // any input arrives, so the UI can paint the card shell immediately and
+      // then grow it from `tool_input_delta` fragments.
+      if (block.type === 'tool_use' && isStreamableToolName(block.name) && typeof block.id === 'string') {
+        onEvent({ type: 'tool_use_start', id: block.id, name: block.name });
+      }
       return;
     }
 
@@ -295,6 +313,12 @@ export function createClaudeStreamHandler(onEvent: EventSink) {
       if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
         if (state && state.type === 'tool_use') {
           state.input += delta.partial_json;
+          // Forward the raw fragment so the UI can repair-and-parse the
+          // growing prefix. We send the fragment (not the accumulated
+          // buffer) to keep each event small; the client concatenates.
+          if (isStreamableToolName(state.name) && typeof state.id === 'string') {
+            onEvent({ type: 'tool_input_delta', id: state.id, delta: delta.partial_json });
+          }
         }
         return;
       }

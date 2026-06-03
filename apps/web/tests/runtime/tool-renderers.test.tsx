@@ -225,3 +225,65 @@ describe('ToolCard dispatch', () => {
     expect(markup).toContain('String to replace was not found');
   });
 });
+
+describe('AskUserQuestion streaming card', () => {
+  const auq = (input: unknown): ToolUse => ({
+    kind: 'tool_use',
+    id: 'q1',
+    name: 'AskUserQuestion',
+    input,
+  });
+
+  it('renders a read-only card with partial questions while input is still streaming', () => {
+    const markup = renderToStaticMarkup(
+      <ToolCard
+        use={auq({
+          questions: [
+            { question: 'Which database?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres' }] },
+          ],
+          __streaming: true,
+        })}
+        runStreaming={true}
+        isLast={true}
+        onAnswerToolUse={() => true}
+      />,
+    );
+    expect(markup).toContain('op-ask-question-streaming');
+    expect(markup).toContain('Which database?');
+    expect(markup).toContain('Postgres');
+    expect(markup).toContain('disabled=""');
+    expect(markup).not.toContain('op-ask-question-submit');
+    expect(markup).toContain('op-ask-question-typing');
+  });
+
+  it('surfaces a question with prompt text even before its options arrive', () => {
+    const markup = renderToStaticMarkup(
+      <ToolCard
+        use={auq({ questions: [{ question: 'Pick a stack', options: [] }], __streaming: true })}
+        runStreaming={true}
+        isLast={true}
+        onAnswerToolUse={() => true}
+      />,
+    );
+    expect(markup).toContain('Pick a stack');
+  });
+
+  it('becomes interactive once the final (non-streaming) input supersedes the stream', () => {
+    const markup = renderToStaticMarkup(
+      <ToolCard
+        use={auq({
+          questions: [
+            { question: 'Which database?', multiSelect: false, options: [{ label: 'Postgres' }, { label: 'SQLite' }] },
+          ],
+        })}
+        runStreaming={false}
+        runSucceeded={true}
+        isLast={true}
+        onAnswerToolUse={() => true}
+      />,
+    );
+    expect(markup).not.toContain('op-ask-question-streaming');
+    expect(markup).toContain('op-ask-question-submit');
+    expect(markup).not.toContain('op-ask-question-typing');
+  });
+});
